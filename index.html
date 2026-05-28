@@ -66,6 +66,8 @@
   .bubble p+p{margin-top:.7rem}
   .bubble ul{margin:.5rem 0 .2rem;padding-left:1.1rem}
   .bubble li{margin:.25rem 0}
+  .bubble.streaming::after{content:"▍";color:var(--amber);animation:caret 1s steps(1) infinite;margin-left:1px}
+  @keyframes caret{50%{opacity:0}}
 
   /* typing */
   .typing{display:flex;gap:5px;padding:.3rem 0}
@@ -227,14 +229,56 @@ async function send(){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:history})
     });
-    const data=await res.json();
-    hideTyping();
-    if(data.reply){
-      typeOut(addMsg('ai',''), data.reply);
-      history.push({role:'assistant', content:data.reply});
-    }else{
-      typeOut(addMsg('ai',''), "Sorry, I hit a snag: "+(data.error||'unknown error')+". You can reach Yeshwant directly at 2singhyeshwant@gmail.com.");
+
+    // If the server returned an error, it sends JSON, not a stream.
+    const ctype = res.headers.get('Content-Type') || '';
+    if(!res.ok || ctype.includes('application/json')){
+      const data = await res.json().catch(()=>({}));
+      hideTyping();
+      typeOut(addMsg('ai',''), "Sorry, I hit a snag: "+(data.error||('error '+res.status))+". You can reach Yeshwant directly at 2singhyeshwant@gmail.com.");
+      sendBtn.disabled=false; return;
     }
+
+    // ── stream the reply token-by-token ──
+    hideTyping();
+    const bubble = addMsg('ai','');
+    bubble.classList.add('streaming');
+    let full = '';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, {stream:true});
+
+      // OpenAI sends Server-Sent-Events: lines beginning with "data: "
+      const lines = buffer.split('\n');
+      buffer = lines.pop();                       // keep last partial line
+      for(const line of lines){
+        const trimmed = line.trim();
+        if(!trimmed.startsWith('data:')) continue;
+        const payload = trimmed.slice(5).trim();
+        if(payload === '[DONE]') continue;
+        try{
+          const obj = JSON.parse(payload);
+          const delta = obj.choices?.[0]?.delta?.content;
+          if(delta){
+            full += delta;
+            bubble.innerHTML = fmt(full);         // re-render as it grows
+            chat.scrollTop = chat.scrollHeight;
+          }
+        }catch(_){ /* ignore keep-alive / partial chunks */ }
+      }
+    }
+
+    if(!full) full = "Sorry, I had nothing to say there.";
+    bubble.classList.remove('streaming');
+    bubble.innerHTML = fmt(full);
+    chat.scrollTop = chat.scrollHeight;
+    history.push({role:'assistant', content:full});
+
   }catch(err){
     hideTyping();
     typeOut(addMsg('ai',''), "I couldn't reach the server. Please try again, or email Yeshwant at 2singhyeshwant@gmail.com.");
